@@ -1,0 +1,1042 @@
+import os
+import shutil
+import time
+import subprocess
+import json
+from PyQt6.QtCore import QThread, pyqtSignal
+from backend.auth import AuthHelper
+
+# کلاس پایه برای جلوگیری از تکرار کد (اختیاری است اما برای تمیزی بهتر است)
+# اما طبق دستور "کد تغییر نکند"، من همان کلاس‌ها را دقیقاً کپی می‌کنم.
+
+
+class CopyWorker(QThread):
+    progressSignal = pyqtSignal(str, str)
+    statsSignal = pyqtSignal(int, int, int)
+    finishedSignal = pyqtSignal(str)
+
+    def __init__(
+        self,
+        file_list,
+        dest_list,
+        target_path,
+        username,
+        password,
+        use_auth,
+        service_list,
+        stop_before,
+        start_after,
+        send_msg,
+        msg_text,
+    ):
+        super().__init__()
+        self.file_list = file_list
+        self.dest_list = dest_list
+        self.target_path = target_path
+        self.username = username
+        self.password = password
+        self.use_auth = use_auth
+        self.service_list = service_list
+        self.stop_before = stop_before == "true"
+        self.start_after = start_after == "true"
+        self.send_msg = send_msg == "true"
+        self.msg_text = msg_text
+
+    def _control_services(self, ip, name, action):
+        if not self.service_list:
+            return
+        services = [s.strip() for s in self.service_list.split(",")]
+        for svc in services:
+            if not svc:
+                continue
+            self.progressSignal.emit(
+                f"[{name}] {action.capitalize()}ing service: {svc}...", "#d08770"
+            )
+            try:
+                cmd = ["sc", f"\\\\{ip}", action, svc]
+                flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=flags,
+                )
+                time.sleep(1)
+            except:
+                pass
+
+    def _send_popup_msg(self, ip, name):
+        if not self.msg_text:
+            return
+        try:
+            cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.msg_text]
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
+            )
+            self.progressSignal.emit(f"[{name}] Message sent.", "#a3be8c")
+        except:
+            pass
+
+    def run(self):
+        error_report = []
+        total = len(self.dest_list)
+        success_systems = 0
+        error_systems = 0
+        self.statsSignal.emit(total, success_systems, error_systems)
+        for dest in self.dest_list:
+            ip = dest["ip"]
+            name = dest["name"]
+            system_has_error = False
+            self.progressSignal.emit(
+                f"--------------------------------------------------", "#4c566a"
+            )
+            self.progressSignal.emit(
+                f"Processing System (COPY): {name} ({ip})", "#88c0d0"
+            )
+            if not self._ping(ip):
+                self.progressSignal.emit(f"[{name}] Offline.", "#bf616a")
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Offline"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            is_connected, mounted = AuthHelper.connect(
+                ip,
+                self.username,
+                self.password,
+                self.use_auth == "true",
+                self.progressSignal,
+            )
+            if not is_connected:
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Auth Failed"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            try:
+                if self.stop_before:
+                    self._control_services(ip, name, "stop")
+                unc_target = self._get_unc_path(ip, self.target_path)
+                if not os.path.exists(unc_target):
+                    try:
+                        os.makedirs(unc_target, exist_ok=True)
+                    except Exception as e:
+                        raise Exception(f"Cannot create dir: {str(e)}")
+                for src_path in self.file_list:
+                    base_name = os.path.basename(src_path)
+                    final_dest = os.path.join(unc_target, base_name)
+                    try:
+                        if os.path.exists(final_dest):
+                            raise Exception(f"File '{base_name}' exists.")
+                        self.progressSignal.emit(
+                            f"[{name}] Copying {base_name}...", "#d8dee9"
+                        )
+                        if os.path.isdir(src_path):
+                            shutil.copytree(src_path, final_dest, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(src_path, final_dest)
+                        self.progressSignal.emit(f"[{name}] Copied.", "#a3be8c")
+                    except Exception as file_error:
+                        system_has_error = True
+                        self.progressSignal.emit(
+                            f"[{name}] Error: {str(file_error)}", "#bf616a"
+                        )
+                        error_report.append(
+                            {"name": name, "ip": ip, "reason": str(file_error)}
+                        )
+                if self.send_msg:
+                    self._send_popup_msg(ip, name)
+            except Exception as global_error:
+                system_has_error = True
+                self.progressSignal.emit(
+                    f"[{name}] Critical: {str(global_error)}", "#bf616a"
+                )
+                error_report.append(
+                    {"name": name, "ip": ip, "reason": str(global_error)}
+                )
+            finally:
+                if self.start_after:
+                    self._control_services(ip, name, "start")
+                AuthHelper.disconnect(ip, mounted)
+            if system_has_error:
+                error_systems += 1
+                self.progressSignal.emit(f"[{name}] Finished with errors.", "#d08770")
+            else:
+                success_systems += 1
+                self.progressSignal.emit(f"[{name}] Success.", "#a3be8c")
+            self.statsSignal.emit(total, success_systems, error_systems)
+        self.finishedSignal.emit(json.dumps(error_report))
+
+    def _ping(self, ip):
+        param = "-n" if os.name == "nt" else "-c"
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            subprocess.check_call(
+                ["ping", param, "1", "-w", "1000", ip],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            return True
+        except:
+            return False
+
+    def _get_unc_path(self, ip, path):
+        if ":" in path:
+            drive, tail = path.split(":", 1)
+            return f"\\\\{ip}\\{drive}${tail}"
+        if path.startswith("\\\\"):
+            return path
+        return f"\\\\{ip}\\{path}"
+
+
+class DeleteWorker(QThread):
+    progressSignal = pyqtSignal(str, str)
+    statsSignal = pyqtSignal(int, int, int)
+    finishedSignal = pyqtSignal(str)
+
+    def __init__(
+        self,
+        file_list,
+        dest_list,
+        target_path,
+        username,
+        password,
+        use_auth,
+        service_list,
+        stop_before,
+        start_after,
+        send_msg,
+        msg_text,
+    ):
+        super().__init__()
+        self.file_list = file_list
+        self.dest_list = dest_list
+        self.target_path = target_path
+        self.username = username
+        self.password = password
+        self.use_auth = use_auth
+        self.service_list = service_list
+        self.stop_before = stop_before == "true"
+        self.start_after = start_after == "true"
+        self.send_msg = send_msg == "true"
+        self.msg_text = msg_text
+
+    def _control_services(self, ip, name, action):
+        if not self.service_list:
+            return
+        services = [s.strip() for s in self.service_list.split(",")]
+        for svc in services:
+            if not svc:
+                continue
+            self.progressSignal.emit(
+                f"[{name}] {action.capitalize()}ing service: {svc}...", "#d08770"
+            )
+            try:
+                cmd = ["sc", f"\\\\{ip}", action, svc]
+                flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=flags,
+                )
+                time.sleep(1)
+            except:
+                pass
+
+    def _send_popup_msg(self, ip, name):
+        if not self.msg_text:
+            return
+        try:
+            cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.msg_text]
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
+            )
+            self.progressSignal.emit(f"[{name}] Message sent.", "#a3be8c")
+        except:
+            pass
+
+    def run(self):
+        error_report = []
+        total = len(self.dest_list)
+        success_systems = 0
+        error_systems = 0
+        self.statsSignal.emit(total, success_systems, error_systems)
+        for dest in self.dest_list:
+            ip = dest["ip"]
+            name = dest["name"]
+            system_has_error = False
+            self.progressSignal.emit(
+                f"--------------------------------------------------", "#4c566a"
+            )
+            self.progressSignal.emit(
+                f"Processing System (DELETE): {name} ({ip})", "#88c0d0"
+            )
+            if not self._ping(ip):
+                self.progressSignal.emit(f"[{name}] Offline.", "#bf616a")
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Offline"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            is_connected, mounted = AuthHelper.connect(
+                ip,
+                self.username,
+                self.password,
+                self.use_auth == "true",
+                self.progressSignal,
+            )
+            if not is_connected:
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Auth Failed"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            try:
+                if self.stop_before:
+                    self._control_services(ip, name, "stop")
+                unc_target = self._get_unc_path(ip, self.target_path)
+                if not os.path.exists(unc_target):
+                    raise Exception(f"Target folder not found")
+                for src_path in self.file_list:
+                    base_name = os.path.basename(src_path)
+                    final_path = os.path.join(unc_target, base_name)
+                    try:
+                        if not os.path.exists(final_path):
+                            raise Exception(f"'{base_name}' not found.")
+                        self.progressSignal.emit(
+                            f"[{name}] Deleting {base_name}...", "#d8dee9"
+                        )
+                        if os.path.isdir(final_path):
+                            shutil.rmtree(final_path)
+                        else:
+                            os.remove(final_path)
+                        self.progressSignal.emit(f"[{name}] Deleted.", "#a3be8c")
+                    except Exception as file_error:
+                        system_has_error = True
+                        self.progressSignal.emit(
+                            f"[{name}] Error: {str(file_error)}", "#bf616a"
+                        )
+                        error_report.append(
+                            {"name": name, "ip": ip, "reason": str(file_error)}
+                        )
+                if self.send_msg:
+                    self._send_popup_msg(ip, name)
+            except Exception as global_error:
+                system_has_error = True
+                self.progressSignal.emit(
+                    f"[{name}] Critical: {str(global_error)}", "#bf616a"
+                )
+                error_report.append(
+                    {"name": name, "ip": ip, "reason": str(global_error)}
+                )
+            finally:
+                if self.start_after:
+                    self._control_services(ip, name, "start")
+                AuthHelper.disconnect(ip, mounted)
+            if system_has_error:
+                error_systems += 1
+                self.progressSignal.emit(f"[{name}] Failed.", "#d08770")
+            else:
+                success_systems += 1
+                self.progressSignal.emit(f"[{name}] Success.", "#a3be8c")
+            self.statsSignal.emit(total, success_systems, error_systems)
+        self.finishedSignal.emit(json.dumps(error_report))
+
+    def _ping(self, ip):
+        param = "-n" if os.name == "nt" else "-c"
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            subprocess.check_call(
+                ["ping", param, "1", "-w", "1000", ip],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            return True
+        except:
+            return False
+
+    def _get_unc_path(self, ip, path):
+        if ":" in path:
+            drive, tail = path.split(":", 1)
+            return f"\\\\{ip}\\{drive}${tail}"
+        if path.startswith("\\\\"):
+            return path
+        return f"\\\\{ip}\\{path}"
+
+
+class ReplaceWorker(QThread):
+    progressSignal = pyqtSignal(str, str)
+    statsSignal = pyqtSignal(int, int, int)
+    finishedSignal = pyqtSignal(str)
+
+    def __init__(
+        self,
+        file_list,
+        dest_list,
+        target_path,
+        prefix,
+        username,
+        password,
+        use_auth,
+        service_list,
+        stop_before,
+        start_after,
+        send_msg,
+        msg_text,
+    ):
+        super().__init__()
+        self.file_list = file_list
+        self.dest_list = dest_list
+        self.target_path = target_path
+        self.prefix = prefix
+        self.username = username
+        self.password = password
+        self.use_auth = use_auth
+        self.service_list = service_list
+        self.stop_before = stop_before == "true"
+        self.start_after = start_after == "true"
+        self.send_msg = send_msg == "true"
+        self.msg_text = msg_text
+
+    def _control_services(self, ip, name, action):
+        if not self.service_list:
+            return
+        services = [s.strip() for s in self.service_list.split(",")]
+        for svc in services:
+            if not svc:
+                continue
+            self.progressSignal.emit(
+                f"[{name}] {action.capitalize()}ing service: {svc}...", "#d08770"
+            )
+            try:
+                cmd = ["sc", f"\\\\{ip}", action, svc]
+                flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=flags,
+                )
+                time.sleep(1)
+            except:
+                pass
+
+    def _send_popup_msg(self, ip, name):
+        if not self.msg_text:
+            return
+        try:
+            cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.msg_text]
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
+            )
+            self.progressSignal.emit(f"[{name}] Message sent.", "#a3be8c")
+        except:
+            pass
+
+    def run(self):
+        error_report = []
+        total = len(self.dest_list)
+        success_systems = 0
+        error_systems = 0
+        self.statsSignal.emit(total, success_systems, error_systems)
+        for dest in self.dest_list:
+            ip = dest["ip"]
+            name = dest["name"]
+            system_has_error = False
+            self.progressSignal.emit(
+                f"--------------------------------------------------", "#4c566a"
+            )
+            self.progressSignal.emit(
+                f"Processing System (REPLACE): {name} ({ip})", "#88c0d0"
+            )
+            if not self._ping(ip):
+                self.progressSignal.emit(f"[{name}] Offline.", "#bf616a")
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Offline"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            is_connected, mounted = AuthHelper.connect(
+                ip,
+                self.username,
+                self.password,
+                self.use_auth == "true",
+                self.progressSignal,
+            )
+            if not is_connected:
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Auth Failed"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            try:
+                if self.stop_before:
+                    self._control_services(ip, name, "stop")
+                unc_target = self._get_unc_path(ip, self.target_path)
+                if not os.path.exists(unc_target):
+                    raise Exception(f"Target folder not found")
+                for src_path in self.file_list:
+                    base_name = os.path.basename(src_path)
+                    current_remote_path = os.path.join(unc_target, base_name)
+                    renamed_name = f"{self.prefix}-{base_name}"
+                    renamed_remote_path = os.path.join(unc_target, renamed_name)
+                    try:
+                        if os.path.exists(current_remote_path):
+                            if os.path.exists(renamed_remote_path):
+                                raise Exception(f"Backup '{renamed_name}' exists.")
+                            self.progressSignal.emit(
+                                f"[{name}] Renaming {base_name}...", "#d8dee9"
+                            )
+                            os.rename(current_remote_path, renamed_remote_path)
+                            self.progressSignal.emit(f"[{name}] Renamed.", "#a3be8c")
+                        else:
+                            self.progressSignal.emit(
+                                f"[{name}] Original missing, skipping rename.",
+                                "#d08770",
+                            )
+                        self.progressSignal.emit(
+                            f"[{name}] Copying new {base_name}...", "#d8dee9"
+                        )
+                        if os.path.isdir(src_path):
+                            shutil.copytree(
+                                src_path, current_remote_path, dirs_exist_ok=True
+                            )
+                        else:
+                            shutil.copy2(src_path, current_remote_path)
+                        self.progressSignal.emit(
+                            f"[{name}] Replaced successfully.", "#a3be8c"
+                        )
+                    except Exception as file_error:
+                        system_has_error = True
+                        self.progressSignal.emit(
+                            f"[{name}] Error: {str(file_error)}", "#bf616a"
+                        )
+                        error_report.append(
+                            {"name": name, "ip": ip, "reason": str(file_error)}
+                        )
+                if self.send_msg:
+                    self._send_popup_msg(ip, name)
+            except Exception as global_error:
+                system_has_error = True
+                self.progressSignal.emit(
+                    f"[{name}] Critical: {str(global_error)}", "#bf616a"
+                )
+                error_report.append(
+                    {"name": name, "ip": ip, "reason": str(global_error)}
+                )
+            finally:
+                if self.start_after:
+                    self._control_services(ip, name, "start")
+                AuthHelper.disconnect(ip, mounted)
+            if system_has_error:
+                error_systems += 1
+                self.progressSignal.emit(f"[{name}] Failed.", "#d08770")
+            else:
+                success_systems += 1
+                self.progressSignal.emit(f"[{name}] Completed.", "#a3be8c")
+            self.statsSignal.emit(total, success_systems, error_systems)
+        self.finishedSignal.emit(json.dumps(error_report))
+
+    def _ping(self, ip):
+        param = "-n" if os.name == "nt" else "-c"
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            subprocess.check_call(
+                ["ping", param, "1", "-w", "1000", ip],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            return True
+        except:
+            return False
+
+    def _get_unc_path(self, ip, path):
+        if ":" in path:
+            drive, tail = path.split(":", 1)
+            return f"\\\\{ip}\\{drive}${tail}"
+        if path.startswith("\\\\"):
+            return path
+        return f"\\\\{ip}\\{path}"
+
+
+class RenameWorker(QThread):
+    progressSignal = pyqtSignal(str, str)
+    statsSignal = pyqtSignal(int, int, int)
+    finishedSignal = pyqtSignal(str)
+
+    def __init__(
+        self,
+        file_list,
+        dest_list,
+        target_path,
+        tag,
+        mode,
+        username,
+        password,
+        use_auth,
+        service_list,
+        stop_before,
+        start_after,
+        send_msg,
+        msg_text,
+    ):
+        super().__init__()
+        self.file_list = file_list
+        self.dest_list = dest_list
+        self.target_path = target_path
+        self.tag = tag
+        self.mode = mode
+        self.username = username
+        self.password = password
+        self.use_auth = use_auth
+        self.service_list = service_list
+        self.stop_before = stop_before == "true"
+        self.start_after = start_after == "true"
+        self.send_msg = send_msg == "true"
+        self.msg_text = msg_text
+
+    def _control_services(self, ip, name, action):
+        if not self.service_list:
+            return
+        services = [s.strip() for s in self.service_list.split(",")]
+        for svc in services:
+            if not svc:
+                continue
+            self.progressSignal.emit(
+                f"[{name}] {action.capitalize()}ing service: {svc}...", "#d08770"
+            )
+            try:
+                cmd = ["sc", f"\\\\{ip}", action, svc]
+                flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=flags,
+                )
+                time.sleep(1)
+            except:
+                pass
+
+    def _send_popup_msg(self, ip, name):
+        if not self.msg_text:
+            return
+        try:
+            cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.msg_text]
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
+            )
+            self.progressSignal.emit(f"[{name}] Message sent.", "#a3be8c")
+        except:
+            pass
+
+    def run(self):
+        error_report = []
+        total = len(self.dest_list)
+        success_systems = 0
+        error_systems = 0
+        self.statsSignal.emit(total, success_systems, error_systems)
+        for dest in self.dest_list:
+            ip = dest["ip"]
+            name = dest["name"]
+            system_has_error = False
+            self.progressSignal.emit(
+                f"--------------------------------------------------", "#4c566a"
+            )
+            self.progressSignal.emit(
+                f"Processing System (RENAME): {name} ({ip})", "#88c0d0"
+            )
+            if not self._ping(ip):
+                self.progressSignal.emit(f"[{name}] Offline.", "#bf616a")
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Offline"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            is_connected, mounted = AuthHelper.connect(
+                ip,
+                self.username,
+                self.password,
+                self.use_auth == "true",
+                self.progressSignal,
+            )
+            if not is_connected:
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Auth Failed"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            try:
+                if self.stop_before:
+                    self._control_services(ip, name, "stop")
+                unc_target = self._get_unc_path(ip, self.target_path)
+                if not os.path.exists(unc_target):
+                    raise Exception(f"Target folder not found")
+                for src_path in self.file_list:
+                    base_name = os.path.basename(src_path)
+                    current_remote_path = os.path.join(unc_target, base_name)
+                    if self.mode == "prefix":
+                        new_name = f"{self.tag}-{base_name}"
+                    else:
+                        name_part, ext = os.path.splitext(base_name)
+                        new_name = f"{name_part}-{self.tag}{ext}"
+                    new_remote_path = os.path.join(unc_target, new_name)
+                    try:
+                        if not os.path.exists(current_remote_path):
+                            raise Exception(f"File '{base_name}' not found.")
+                        if os.path.exists(new_remote_path):
+                            raise Exception(f"Name '{new_name}' exists.")
+                        self.progressSignal.emit(
+                            f"[{name}] Renaming {base_name}...", "#d8dee9"
+                        )
+                        os.rename(current_remote_path, new_remote_path)
+                        self.progressSignal.emit(f"[{name}] Success.", "#a3be8c")
+                    except Exception as file_error:
+                        system_has_error = True
+                        self.progressSignal.emit(
+                            f"[{name}] Error: {str(file_error)}", "#bf616a"
+                        )
+                        error_report.append(
+                            {"name": name, "ip": ip, "reason": str(file_error)}
+                        )
+                if self.send_msg:
+                    self._send_popup_msg(ip, name)
+            except Exception as global_error:
+                system_has_error = True
+                self.progressSignal.emit(
+                    f"[{name}] Critical: {str(global_error)}", "#bf616a"
+                )
+                error_report.append(
+                    {"name": name, "ip": ip, "reason": str(global_error)}
+                )
+            finally:
+                if self.start_after:
+                    self._control_services(ip, name, "start")
+                AuthHelper.disconnect(ip, mounted)
+            if system_has_error:
+                error_systems += 1
+                self.progressSignal.emit(f"[{name}] Failed.", "#d08770")
+            else:
+                success_systems += 1
+                self.progressSignal.emit(f"[{name}] Completed.", "#a3be8c")
+            self.statsSignal.emit(total, success_systems, error_systems)
+        self.finishedSignal.emit(json.dumps(error_report))
+
+    def _ping(self, ip):
+        param = "-n" if os.name == "nt" else "-c"
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            subprocess.check_call(
+                ["ping", param, "1", "-w", "1000", ip],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            return True
+        except:
+            return False
+
+    def _get_unc_path(self, ip, path):
+        if ":" in path:
+            drive, tail = path.split(":", 1)
+            return f"\\\\{ip}\\{drive}${tail}"
+        if path.startswith("\\\\"):
+            return path
+        return f"\\\\{ip}\\{path}"
+
+
+class SingleRenameWorker(QThread):
+    progressSignal = pyqtSignal(str, str)
+    statsSignal = pyqtSignal(int, int, int)
+    finishedSignal = pyqtSignal(str)
+
+    def __init__(
+        self, dest_list, target_path, old_name, new_name, username, password, use_auth
+    ):
+        super().__init__()
+        self.dest_list = dest_list
+        self.target_path = target_path
+        self.old_name = old_name
+        self.new_name = new_name
+        self.username = username
+        self.password = password
+        self.use_auth = use_auth
+
+    def run(self):
+        error_report = []
+        total = len(self.dest_list)
+        success_systems = 0
+        error_systems = 0
+        self.statsSignal.emit(total, success_systems, error_systems)
+        for dest in self.dest_list:
+            ip = dest["ip"]
+            name = dest["name"]
+            system_has_error = False
+            self.progressSignal.emit(
+                f"--------------------------------------------------", "#4c566a"
+            )
+            self.progressSignal.emit(
+                f"Processing System (SINGLE RENAME): {name} ({ip})", "#88c0d0"
+            )
+            if not self._ping(ip):
+                self.progressSignal.emit(f"[{name}] Offline.", "#bf616a")
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Offline"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            is_connected, mounted = AuthHelper.connect(
+                ip,
+                self.username,
+                self.password,
+                self.use_auth == "true",
+                self.progressSignal,
+            )
+            if not is_connected:
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Auth Failed"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            try:
+                unc_target = self._get_unc_path(ip, self.target_path)
+                if not os.path.exists(unc_target):
+                    raise Exception(f"Target folder not found")
+                old_path = os.path.join(unc_target, self.old_name)
+                new_path = os.path.join(unc_target, self.new_name)
+                if not os.path.exists(old_path):
+                    raise Exception(f"Source '{self.old_name}' not found.")
+                if os.path.exists(new_path):
+                    raise Exception(f"Target '{self.new_name}' exists.")
+                self.progressSignal.emit(f"[{name}] Renaming...", "#d8dee9")
+                os.rename(old_path, new_path)
+                self.progressSignal.emit(f"[{name}] Success.", "#a3be8c")
+            except Exception as e:
+                system_has_error = True
+                self.progressSignal.emit(f"[{name}] Error: {str(e)}", "#bf616a")
+                error_report.append({"name": name, "ip": ip, "reason": str(e)})
+            finally:
+                AuthHelper.disconnect(ip, mounted)
+            if system_has_error:
+                error_systems += 1
+                self.progressSignal.emit(f"[{name}] Failed.", "#d08770")
+            else:
+                success_systems += 1
+                self.progressSignal.emit(f"[{name}] Done.", "#a3be8c")
+            self.statsSignal.emit(total, success_systems, error_systems)
+        self.finishedSignal.emit(json.dumps(error_report))
+
+    def _ping(self, ip):
+        param = "-n" if os.name == "nt" else "-c"
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            subprocess.check_call(
+                ["ping", param, "1", "-w", "1000", ip],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            return True
+        except:
+            return False
+
+    def _get_unc_path(self, ip, path):
+        if ":" in path:
+            drive, tail = path.split(":", 1)
+            return f"\\\\{ip}\\{drive}${tail}"
+        if path.startswith("\\\\"):
+            return path
+        return f"\\\\{ip}\\{path}"
+
+
+class ServiceWorker(QThread):
+    progressSignal = pyqtSignal(str, str)
+    statsSignal = pyqtSignal(int, int, int)
+    finishedSignal = pyqtSignal(str)
+
+    def __init__(self, dest_list, service_name, action, username, password, use_auth):
+        super().__init__()
+        self.dest_list = dest_list
+        self.service_name = service_name
+        self.action = action
+        self.username = username
+        self.password = password
+        self.use_auth = use_auth
+
+    def run(self):
+        error_report = []
+        total = len(self.dest_list)
+        success_systems = 0
+        error_systems = 0
+        self.statsSignal.emit(total, success_systems, error_systems)
+        for dest in self.dest_list:
+            ip = dest["ip"]
+            name = dest["name"]
+            system_has_error = False
+            self.progressSignal.emit(
+                f"--------------------------------------------------", "#4c566a"
+            )
+            self.progressSignal.emit(
+                f"Processing System (SERVICE {self.action.upper()}): {name} ({ip})",
+                "#88c0d0",
+            )
+            if not self._ping(ip):
+                self.progressSignal.emit(f"[{name}] Offline.", "#bf616a")
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Offline"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            is_connected, mounted = AuthHelper.connect(
+                ip,
+                self.username,
+                self.password,
+                self.use_auth == "true",
+                self.progressSignal,
+            )
+            if not is_connected:
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Auth Failed"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            try:
+                sc_cmd = ["sc", f"\\\\{ip}", self.action, self.service_name]
+                self.progressSignal.emit(
+                    f"[{name}] Sending {self.action} command...", "#d8dee9"
+                )
+                flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                result = subprocess.run(
+                    sc_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=flags,
+                )
+                if result.returncode == 0:
+                    self.progressSignal.emit(f"[{name}] Success.", "#a3be8c")
+                else:
+                    err_msg = result.stderr.decode().strip() or "Unknown Error"
+                    try:
+                        err_msg = result.stdout.decode().strip() + " " + err_msg
+                    except:
+                        pass
+                    raise Exception(f"SC Error: {err_msg}")
+            except Exception as e:
+                system_has_error = True
+                self.progressSignal.emit(f"[{name}] Error: {str(e)}", "#bf616a")
+                error_report.append({"name": name, "ip": ip, "reason": str(e)})
+            finally:
+                AuthHelper.disconnect(ip, mounted)
+            if system_has_error:
+                error_systems += 1
+                self.progressSignal.emit(f"[{name}] Failed.", "#d08770")
+            else:
+                success_systems += 1
+                self.progressSignal.emit(f"[{name}] Success.", "#a3be8c")
+            self.statsSignal.emit(total, success_systems, error_systems)
+        self.finishedSignal.emit(json.dumps(error_report))
+
+    def _ping(self, ip):
+        param = "-n" if os.name == "nt" else "-c"
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            subprocess.check_call(
+                ["ping", param, "1", "-w", "1000", ip],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            return True
+        except:
+            return False
+
+
+class MessageWorker(QThread):
+    progressSignal = pyqtSignal(str, str)
+    statsSignal = pyqtSignal(int, int, int)
+    finishedSignal = pyqtSignal(str)
+
+    def __init__(self, dest_list, message, username, password, use_auth):
+        super().__init__()
+        self.dest_list = dest_list
+        self.message = message
+        self.username = username
+        self.password = password
+        self.use_auth = use_auth
+
+    def run(self):
+        error_report = []
+        total = len(self.dest_list)
+        success_systems = 0
+        error_systems = 0
+        self.statsSignal.emit(total, success_systems, error_systems)
+        for dest in self.dest_list:
+            ip = dest["ip"]
+            name = dest["name"]
+            system_has_error = False
+            self.progressSignal.emit(
+                f"--------------------------------------------------", "#4c566a"
+            )
+            self.progressSignal.emit(
+                f"Processing System (MESSAGE): {name} ({ip})", "#88c0d0"
+            )
+            if not self._ping(ip):
+                self.progressSignal.emit(f"[{name}] Offline.", "#bf616a")
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Offline"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            is_connected, mounted = AuthHelper.connect(
+                ip,
+                self.username,
+                self.password,
+                self.use_auth == "true",
+                self.progressSignal,
+            )
+            if not is_connected:
+                error_systems += 1
+                error_report.append({"name": name, "ip": ip, "reason": "Auth Failed"})
+                self.statsSignal.emit(total, success_systems, error_systems)
+                continue
+            try:
+                cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.message]
+                self.progressSignal.emit(f"[{name}] Sending message...", "#d8dee9")
+                flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=flags,
+                )
+                if result.returncode == 0:
+                    self.progressSignal.emit(f"[{name}] Sent.", "#a3be8c")
+                else:
+                    err_msg = (
+                        result.stderr.decode().strip()
+                        or "Msg failed (User not logged in?)"
+                    )
+                    raise Exception(f"{err_msg}")
+            except Exception as e:
+                system_has_error = True
+                self.progressSignal.emit(f"[{name}] Error: {str(e)}", "#bf616a")
+                error_report.append({"name": name, "ip": ip, "reason": str(e)})
+            finally:
+                AuthHelper.disconnect(ip, mounted)
+            if system_has_error:
+                error_systems += 1
+                self.progressSignal.emit(f"[{name}] Failed.", "#d08770")
+            else:
+                success_systems += 1
+                self.progressSignal.emit(f"[{name}] Success.", "#a3be8c")
+            self.statsSignal.emit(total, success_systems, error_systems)
+        self.finishedSignal.emit(json.dumps(error_report))
+
+    def _ping(self, ip):
+        param = "-n" if os.name == "nt" else "-c"
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            subprocess.check_call(
+                ["ping", param, "1", "-w", "1000", ip],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            return True
+        except:
+            return False
