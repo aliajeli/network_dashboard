@@ -24,8 +24,9 @@ ComboBox {
             verticalAlignment: Text.AlignVCenter 
         } 
         background: Rectangle { 
-            color: highlighted ? Theme.primary : control.c_panel 
+            color: highlighted ? Theme.primary : control.c_bg 
             radius: Theme.radius
+            width: parent.width-8
         } 
         highlighted: control.highlightedIndex === index 
     } 
@@ -87,7 +88,7 @@ ComboBox {
         } 
         
         background: Rectangle { 
-            color: control.c_panel
+            color: control.c_bg
             border.color: Theme.border
             radius: Theme.radius
         } 

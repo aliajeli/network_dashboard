@@ -31,7 +31,7 @@ Rectangle {
     Row {
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.margins: 5 
+        anchors.margins: 5
         spacing: 8
 
         // --- Theme Switcher Button ---

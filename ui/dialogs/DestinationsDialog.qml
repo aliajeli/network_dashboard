@@ -47,7 +47,7 @@ Dialog {
                 onClicked: { if(destInpDist.text !== "" && destInpBranch.text !== "" && destInpName.text !== "") { if(onSaveDest) onSaveDest(destInpDist.text, destInpBranch.text, destInpName.text, destInpIp.text); if(!root.isEditMode) { destInpName.text = ""; destInpIp.text = "" } } } 
             }
         }
-        Rectangle { width: 1; height: parent.height; color: Theme.text_dim }
+        Rectangle { width: 1; height: parent.height; color: Theme.accent }
         ColumnLayout { 
             width: parent.width - 300 - 20; height: parent.height; spacing: 10
             RowLayout { 

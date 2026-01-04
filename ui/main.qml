@@ -354,8 +354,8 @@ function onUpdateStatsSignal(total, val1, val2) {
         anchors.fill: parent
         color: Theme.bg_input
         radius: 10
-        border.color: Theme.border
-        border.width: 2 
+        border.color: Theme.accent
+        border.width: 2
         clip: true 
 
         TitleBar { id: titleBar; windowRef: window; anchors.top: parent.top }
