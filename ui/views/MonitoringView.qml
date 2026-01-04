@@ -260,7 +260,14 @@ TCard {
                                     bgCol: Theme.error
                                     action: function() { backend.remote_power_action(model.sysIp, "shutdown") }
                                 }
-
+                                // 4. RDP (Conditional)
+                                PopupItem {
+                                    visible: (model.sysType === "Client" || model.sysType === "Checkout")
+                                    label: "Remote Desktop"
+                                    txtCol: Theme.success // سبز یا آبی برای اتصال
+                                    bgCol: Theme.success
+                                    action: function() { backend.launch_rdp(model.sysIp) }
+                                }
                                 // Separator if power options are visible
                                 Rectangle {
                                     Layout.fillWidth: true; height: 1
@@ -268,7 +275,7 @@ TCard {
                                     visible: (model.sysType === "Client" || model.sysType === "Checkout")
                                 }
 
-                                // 4. Delete
+                                // 5. Delete
                                 PopupItem {
                                     label: "Delete"
                                     txtCol: Theme.text_dim

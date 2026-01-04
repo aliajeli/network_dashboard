@@ -446,3 +446,21 @@ class Backend(QObject):
 
         self.log(f"[{ip}] Initiating {action}...", "WARN")
         threading.Thread(target=run_cmd).start()
+
+    @pyqtSlot(str)
+    def launch_rdp(self, ip):
+        """
+        Launches Windows Remote Desktop Connection for the given IP.
+        """
+        if not ip:
+            return
+        self.log(f"[{ip}] Launching RDP...", "INFO")
+
+        def run_rdp():
+            try:
+                # دستور mstsc /v:IP برای باز کردن ریموت
+                subprocess.Popen(f"mstsc /v:{ip}", shell=True)
+            except Exception as e:
+                self.log(f"[{ip}] Failed to launch RDP: {str(e)}", "ERROR")
+
+        threading.Thread(target=run_rdp).start()
