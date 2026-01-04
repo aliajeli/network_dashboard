@@ -21,20 +21,6 @@ ApplicationWindow {
 
     property real currentProgress: 0.0
 
-    // // --- Nord Colors ---
-    // property color c_bg_dark: "#2e3440"
-    // property color c_bg_panel: "#3b4252"
-    // property color c_bg_input: "#434c5e"
-    // property color c_comment: "#4c566a"
-    // property color c_text_main: "#eceff4"
-    // property color c_text_dim: "#d8dee9"
-    // property color c_accent: "#88c0d0"
-    // property color c_primary: "#5e81ac"
-    // property color c_green: "#a3be8c"
-    // property color c_red: "#bf616a"
-    // property color c_orange: "#d08770"
-    // property color c_yellow: "#ebcb8b" // اضافه شده برای Warning
-
     // State Variables
     property string totalCount: "-"
     property string onlineCount: "-"
@@ -111,7 +97,7 @@ ApplicationWindow {
     Connections {
         target: backend
         function onLogSignal(msg, colorCode) { logModel.append({"messageText": msg, "messageColor": colorCode}) }
-        function onPingResultSignal(status) { monitoringView.pingStatusText = status; monitoringView.pingStatusColor = (status === "Online") ? c_green : c_red }
+        function onPingResultSignal(status) { monitoringView.pingStatusText = status; monitoringView.pingStatusColor = (status === "Online") ? Theme.success : Theme.warning }
         function onUpdateMonitorSignal(branch, name, color) { updateSystemStatus(branch, name, color) }
         
 function onUpdateStatsSignal(total, val1, val2) { 
@@ -298,9 +284,56 @@ function onUpdateStatsSignal(total, val1, val2) {
     function openFileBrowser(folderMode) { window.browseFolderMode = folderMode; var quick = JSON.parse(backend.get_quick_access()); quickAccessModel.clear(); for(var i=0; i<quick.length; i++) quickAccessModel.append(quick[i]); if(window.currentBrowsePath === "") window.currentBrowsePath = backend.get_home_dir(); refreshDir(window.currentBrowsePath); filePickerDialog.open() }
     function refreshDir(path) { window.currentBrowsePath = path; var items = JSON.parse(backend.list_dir(path)); dirModel.clear(); for(var i=0; i<items.length; i++) { items[i].checked = false; dirModel.append(items[i]) } }
     function addSelectedFiles() { var added = false; for(var i=0; i<dirModel.count; i++) { var item = dirModel.get(i); if (item.checked) { if (window.browseFolderMode && item.type === "Folder") { checkAndAddFile(item.name, item.path, "Folder"); added = true } else if (!window.browseFolderMode && item.type === "File") { checkAndAddFile(item.name, item.path, "File"); added = true } } } if (added) filePickerDialog.close() }
-    function internalAddSystem(model, branch, type, name, ip) { var found = -1; for(var i=0; i < model.count; i++) { if(model.get(i).branchName === branch) { found = i; break } } if (found === -1) { model.append({"branchName": branch, "systems": []}); found = model.count - 1 } var sysList = model.get(found).systems; sysList.append({"sysName": name, "sysType": type, "sysIp": ip, "statusColor": c_bg_panel.toString()}) }
-    function updateSystemStatus(branch, name, color) { for(var i=0; i < branchesModel.count; i++) { if(branchesModel.get(i).branchName === branch) { var systems = branchesModel.get(i).systems; for(var j=0; j < systems.count; j++) { if(systems.get(j).sysName === name) { systems.setProperty(j, "statusColor", color); return } } } } }
-    function resetSystemStatus() { for(var i=0; i < branchesModel.count; i++) { var systems = branchesModel.get(i).systems; for(var j=0; j < systems.count; j++) { systems.setProperty(j, "statusColor", c_bg_panel.toString()) } } }
+    function internalAddSystem(model, branch, type, name, ip) { 
+        var found = -1; 
+        for(var i=0; i < model.count; i++) { 
+            if(model.get(i).branchName === branch) { found = i; break } 
+        } 
+        if (found === -1) { 
+            model.append({"branchName": branch, "systems": []}); found = model.count - 1 
+        } 
+        var sysList = model.get(found).systems; 
+        // به جای statusColor از status استفاده می‌کنیم
+        sysList.append({"sysName": name, "sysType": type, "sysIp": ip, "status": "Unknown"}) 
+    }
+        // 2. آپدیت وضعیت
+    function updateSystemStatus(branch, name, colorCode) { 
+        // نکته: پایتون همچنان رنگ می‌فرستد (چون لاجیک پیچیده پینگ آنجاست)
+        // اما ما می‌توانیم آن را به وضعیت تبدیل کنیم یا مستقیم استفاده کنیم
+        // بهتر است backend.py را هم تغییر دهیم که وضعیت بفرستد (Online/Offline)
+        // اما فعلا برای کمترین تغییر، رنگ را در مدلی به نام statusColor ذخیره می‌کنیم
+        // ولی در View شرط می‌گذاریم.
+        
+        // راه حل سریع‌تر: بیایید همان statusColor را نگه داریم اما در View بایندینگ بگذاریم.
+        // مشکل اینجاست که ListModel در QML استاتیک می‌شود.
+        
+        // --- راه حل نهایی و تمیز: ---
+        // ما یک پراپرتی "statusType" اضافه می‌کنیم: "Online", "Offline", "Idle"
+        
+        for(var i=0; i < branchesModel.count; i++) { 
+            if(branchesModel.get(i).branchName === branch) { 
+                var systems = branchesModel.get(i).systems; 
+                for(var j=0; j < systems.count; j++) { 
+                    if(systems.get(j).sysName === name) { 
+                        // اینجا فرض می‌کنیم colorCode که از پایتون می‌آید تعیین کننده است
+                        // اما اگر مانیتورینگ خاموش شد، باید برگردد به رنگ تم
+                        systems.setProperty(j, "statusColor", colorCode); 
+                        return 
+                    } 
+                } 
+            } 
+        } 
+    }
+        // 3. ریست کردن
+    function resetSystemStatus() { 
+        for(var i=0; i < branchesModel.count; i++) { 
+            var systems = branchesModel.get(i).systems; 
+            for(var j=0; j < systems.count; j++) { 
+                // وقتی مانیتورینگ قطع شد، مقدار را خالی یا خاص می‌کنیم
+                systems.setProperty(j, "statusColor", "default") 
+            } 
+        } 
+    }
     
     function openAddDialog() { addSysDialog.isEditMode = false; addSysDialog.branchText = ""; addSysDialog.nameText = ""; addSysDialog.ipText = ""; addSysDialog.typeIndex = 4; addSysDialog.open() }
     function openEditDialog(bIdx, sIdx, branch, name, ip, type) { addSysDialog.isEditMode = true; addSysDialog.editBranchIndex = bIdx; addSysDialog.editSysIndex = sIdx; addSysDialog.branchText = branch; addSysDialog.nameText = name; addSysDialog.ipText = ip; for(var i=0; i<typeModel.count; i++) if(typeModel.get(i).text === type) { addSysDialog.typeIndex = i; break }; addSysDialog.open() }

@@ -61,7 +61,7 @@ class DatabaseManager:
                     "sysName": name,
                     "sysType": type_,
                     "sysIp": ip,
-                    "statusColor": "#3b4252",
+                    "statusColor": "default",
                 }
             )
         result = []

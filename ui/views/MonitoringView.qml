@@ -160,7 +160,13 @@ TCard {
                     delegate: Rectangle {
                         width: (sysFlow.width - (4 * sysFlow.spacing)) / 5 
                         height: 24
-                        color: model.statusColor ? model.statusColor : Theme.bg_panel
+                        color: {
+                            if (model.statusColor === "default" || model.statusColor === undefined || model.statusColor === "#3b4252") {
+                                return Theme.bg_panel // رنگ تم (قابل تغییر)
+                            } else {
+                                return model.statusColor // رنگ وضعیت (سبز/قرمز/زرد)
+                            }
+                        }
                         radius: 4
 
                         Label {
