@@ -414,3 +414,35 @@ class Backend(QObject):
     @pyqtSlot()
     def open_folder_dialog(self):
         pass
+
+    # ... (بقیه توابع) ...
+
+    @pyqtSlot(str, str)
+    def remote_power_action(self, ip, action):
+        """
+        Executes remote shutdown or restart.
+        action: 'shutdown' (-s) or 'restart' (-r)
+        """
+        if not ip:
+            return
+
+        switch = "-s" if action == "shutdown" else "-r"
+        # -f = Force, -t 0 = Time 0, -m = Unc Path
+        cmd = f"shutdown {switch} -f -t 0 -m \\\\{ip}"
+
+        def run_cmd():
+            try:
+                # برای اجرای دستورات ریموت، شاید نیاز به احراز هویت قبلی باشد (net use)
+                # اما فرض می‌کنیم دسترسی ادمین وجود دارد.
+                subprocess.run(
+                    cmd,
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self.log(f"[{ip}] Sent {action} command.", "SUCCESS")
+            except Exception as e:
+                self.log(f"[{ip}] Failed to {action}: {str(e)}", "ERROR")
+
+        self.log(f"[{ip}] Initiating {action}...", "WARN")
+        threading.Thread(target=run_cmd).start()

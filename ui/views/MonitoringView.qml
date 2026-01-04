@@ -189,11 +189,13 @@ TCard {
                         // --- FIX: جایگزینی Menu با Custom Popup ---
                         Popup {
                             id: ctxPopup
-                            // باز شدن در مرکز آیتم
+                            // موقعیت باز شدن
                             x: (parent.width - width) / 2
                             y: (parent.height - height) / 2
-                            width: 120
-                            height: 70
+                            // ارتفاع را خودکار بر اساس محتوا تنظیم می‌کنیم
+                            width: 140
+                            height: popupCol.implicitHeight + 30
+                            
                             modal: true
                             focus: true
                             closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -206,48 +208,72 @@ TCard {
                             }
 
                             ColumnLayout {
+                                id: popupCol
                                 anchors.fill: parent
                                 anchors.margins: 4
                                 spacing: 2
 
-                                // دکمه Edit
-                                Rectangle {
-                                    Layout.fillWidth: true; Layout.fillHeight: true
-                                    color: maEdit.containsMouse ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.3) : "transparent"
+                                // Helper Component for Menu Items
+                                component PopupItem: Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 30
+                                    color: ma.containsMouse ? Qt.rgba(bgCol.r, bgCol.g, bgCol.b, 0.2) : "transparent"
                                     radius: 4
+                                    
+                                    property string label
+                                    property color txtCol: Theme.text_main
+                                    property color bgCol: Theme.primary
+                                    property var action
+                                    
                                     Text {
-                                        text: "Edit"
-                                        color: Theme.text_main
+                                        text: parent.label
+                                        color: parent.txtCol
                                         font.pixelSize: 12
                                         anchors.centerIn: parent
                                     }
                                     MouseArea {
-                                        id: maEdit; anchors.fill: parent; hoverEnabled: true
-                                        onClicked: {
-                                            monitoring.requestEditSystem(branchDelegate.currentBranchIndex, index, branchDelegate.currentBranchName, model.sysName, model.sysIp, model.sysType)
-                                            ctxPopup.close()
-                                        }
+                                        id: ma; anchors.fill: parent; hoverEnabled: true
+                                        onClicked: { parent.action(); ctxPopup.close() }
                                     }
                                 }
 
-                                // دکمه Delete
+                                // 1. Edit
+                                PopupItem {
+                                    label: "Edit"
+                                    action: function() { monitoring.requestEditSystem(branchDelegate.currentBranchIndex, index, branchDelegate.currentBranchName, model.sysName, model.sysIp, model.sysType) }
+                                }
+
+                                // 2. Restart (Conditional)
+                                PopupItem {
+                                    visible: (model.sysType === "Client" || model.sysType === "Checkout")
+                                    label: "Restart"
+                                    txtCol: Theme.warning
+                                    bgCol: Theme.warning
+                                    action: function() { backend.remote_power_action(model.sysIp, "restart") }
+                                }
+
+                                // 3. Shutdown (Conditional)
+                                PopupItem {
+                                    visible: (model.sysType === "Client" || model.sysType === "Checkout")
+                                    label: "Shutdown"
+                                    txtCol: Theme.error // قرمز برای خطر بیشتر
+                                    bgCol: Theme.error
+                                    action: function() { backend.remote_power_action(model.sysIp, "shutdown") }
+                                }
+
+                                // Separator if power options are visible
                                 Rectangle {
-                                    Layout.fillWidth: true; Layout.fillHeight: true
-                                    color: maDel.containsMouse ? Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.3) : "transparent"
-                                    radius: 4
-                                    Text {
-                                        text: "Delete"
-                                        color: Theme.error // رنگ قرمز برای خطر
-                                        font.pixelSize: 12
-                                        anchors.centerIn: parent
-                                    }
-                                    MouseArea {
-                                        id: maDel; anchors.fill: parent; hoverEnabled: true
-                                        onClicked: {
-                                            monitoring.requestDeleteSystem(branchDelegate.currentBranchIndex, index)
-                                            ctxPopup.close()
-                                        }
-                                    }
+                                    Layout.fillWidth: true; height: 1
+                                    color: Theme.border
+                                    visible: (model.sysType === "Client" || model.sysType === "Checkout")
+                                }
+
+                                // 4. Delete
+                                PopupItem {
+                                    label: "Delete"
+                                    txtCol: Theme.text_dim
+                                    bgCol: Theme.text_dim
+                                    action: function() { monitoring.requestDeleteSystem(branchDelegate.currentBranchIndex, index) }
                                 }
                             }
                         }
