@@ -10,6 +10,8 @@ from PyQt6.QtCore import QObject, pyqtSlot, pyqtSignal, QStandardPaths, QStorage
 from PyQt6.QtWidgets import QFileDialog
 
 from backend.database import DatabaseManager
+
+# مطمئن شوید MonitorWorker هم ایمپورت شده است
 from backend.workers import (
     CopyWorker,
     DeleteWorker,
@@ -18,6 +20,7 @@ from backend.workers import (
     SingleRenameWorker,
     ServiceWorker,
     MessageWorker,
+    MonitorWorker,
 )
 
 
@@ -25,26 +28,18 @@ class Backend(QObject):
     logSignal = pyqtSignal(str, str)
     pingResultSignal = pyqtSignal(str)
     updateMonitorSignal = pyqtSignal(str, str, str)
-    updateStatsSignal = pyqtSignal(int, int, int)
+    updateStatsSignal = pyqtSignal(int, int, int)  # مانیتورینگ
+    opProgressSignal = pyqtSignal(int, int, int)  # عملیات
     resetMonitoringSignal = pyqtSignal()
     opFinishedSignal = pyqtSignal(str)
     fileAddedSignal = pyqtSignal(str, str, str)
     filesClearedSignal = pyqtSignal()
-    logSignal = pyqtSignal(str, str)
-    pingResultSignal = pyqtSignal(str)
-    updateMonitorSignal = pyqtSignal(str, str, str)
-    updateStatsSignal = pyqtSignal(int, int, int)
-    resetMonitoringSignal = pyqtSignal()
-    opFinishedSignal = pyqtSignal(str)
-    fileAddedSignal = pyqtSignal(str, str, str)
-    filesClearedSignal = pyqtSignal()
-    opProgressSignal = pyqtSignal(int, int, int)
 
     def __init__(self):
         super().__init__()
         self.db = DatabaseManager()
-        self.monitoring = False
-        self.workers = []
+        self.monitor_thread = None
+        self.workers = []  # <--- ضروری برای جلوگیری از AttributeError
 
     def log(self, message, level="INFO"):
         color = "#4c566a"
@@ -56,6 +51,7 @@ class Backend(QObject):
             color = "#d08770"
         self.logSignal.emit(f"{time.strftime('[%H:%M:%S]')} {message}", color)
 
+    # ... (متدهای load_monitoring, load_destinations, add_... بدون تغییر) ...
     @pyqtSlot(result=str)
     def load_monitoring(self):
         systems = self.db.get_flat_monitoring_list()
@@ -122,61 +118,25 @@ class Backend(QObject):
 
     @pyqtSlot()
     def start_monitoring(self):
-        if self.monitoring:
+        if self.monitor_thread and self.monitor_thread.isRunning():
             return
-        self.monitoring = True
         self.log("Monitoring Started.", "SUCCESS")
-        threading.Thread(target=self._monitoring_loop, daemon=True).start()
+        self.monitor_thread = MonitorWorker(self.db)
+        self.monitor_thread.updateSignal.connect(self.updateMonitorSignal)
+        self.monitor_thread.statsSignal.connect(self.updateStatsSignal)
+        self.monitor_thread.start()
 
     @pyqtSlot()
     def stop_monitoring(self):
-        self.monitoring = False
+        if self.monitor_thread:
+            self.monitor_thread.stop()
+            self.monitor_thread = None
         self.log("Monitoring Stopped.", "WARN")
         self.resetMonitoringSignal.emit()
         systems = self.db.get_flat_monitoring_list()
         self.updateStatsSignal.emit(len(systems), -1, -1)
 
-    def _monitoring_loop(self):
-        C_GREEN = "#a3be8c"
-        C_ORANGE = "#d08770"
-        C_RED = "#bf616a"
-        C_YELLOW = "#ebcb8b"
-        while self.monitoring:
-            systems = self.db.get_flat_monitoring_list()
-            total = len(systems)
-            online = 0
-            offline = 0
-            with ThreadPoolExecutor(max_workers=30) as executor:
-                futures = {
-                    executor.submit(self._execute_ping, s[2]): s for s in systems
-                }
-                for f in futures:
-                    if not self.monitoring:
-                        break
-                    branch, name, ip = futures[f]
-                    try:
-                        is_up, ms = f.result()
-                        col = C_RED
-                        if is_up:
-                            online += 1
-                            if ms < 100:
-                                col = C_GREEN
-                            elif ms < 200:
-                                col = C_YELLOW
-                            elif ms < 400:
-                                col = C_ORANGE
-                            else:
-                                col = C_RED
-                        else:
-                            offline += 1
-                            col = C_RED
-                        self.updateMonitorSignal.emit(branch, name, col)
-                    except:
-                        pass
-            if self.monitoring:
-                self.updateStatsSignal.emit(total, online, offline)
-                time.sleep(5)
-
+    # ... (متدهای فایل سیستم: get_home_dir, list_dir, get_quick_access, clear_files بدون تغییر) ...
     @pyqtSlot(result=str)
     def get_home_dir(self):
         return os.path.expanduser("~").replace("\\", "/")
@@ -251,6 +211,7 @@ class Backend(QObject):
         self.filesClearedSignal.emit()
         self.log("File list cleared.", "INFO")
 
+    # ... (متدهای perform_batch_copy و غیره بدون تغییر) ...
     @pyqtSlot(str, str, str, str, str, str, str, str, str, str, str)
     def perform_batch_copy(
         self,
@@ -416,6 +377,7 @@ class Backend(QObject):
         w = MessageWorker(dests, message, username, password, use_auth)
         self._start_worker(w)
 
+    # ... (export_log_to_file بدون تغییر) ...
     @pyqtSlot(str)
     def export_log_to_file(self, log_content):
         file_path, _ = QFileDialog.getSaveFileName(
@@ -429,15 +391,21 @@ class Backend(QObject):
             except Exception as e:
                 self.log(f"Export failed: {str(e)}", "ERROR")
 
+    # --- متد شروع ورکر (اصلاح شده) ---
     def _start_worker(self, worker):
         worker.progressSignal.connect(lambda msg, col: self.logSignal.emit(msg, col))
-
-        # تغییر مهم: اتصال statsSignal ورکر به سیگنال جدید opProgressSignal
         worker.statsSignal.connect(lambda t, s, e: self.opProgressSignal.emit(t, s, e))
-
         worker.finishedSignal.connect(lambda err: self.opFinishedSignal.emit(err))
+
+        # پاکسازی خودکار
+        worker.finished.connect(lambda: self._cleanup_worker(worker))
+
         self.workers.append(worker)
         worker.start()
+
+    def _cleanup_worker(self, worker):
+        if worker in self.workers:
+            self.workers.remove(worker)
 
     @pyqtSlot()
     def open_file_dialog(self):

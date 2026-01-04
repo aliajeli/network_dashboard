@@ -3,6 +3,8 @@ import shutil
 import time
 import subprocess
 import json
+import re  # <--- این خط برای تحلیل پینگ لازم است
+from concurrent.futures import ThreadPoolExecutor  # <--- این خط فراموش شده بود
 from PyQt6.QtCore import QThread, pyqtSignal
 from backend.auth import AuthHelper
 
@@ -1040,3 +1042,92 @@ class MessageWorker(QThread):
             return True
         except:
             return False
+
+
+class MonitorWorker(QThread):
+    # سیگنال برای ارسال نتیجه: (branch, name, color)
+    updateSignal = pyqtSignal(str, str, str)
+    statsSignal = pyqtSignal(int, int, int)
+
+    def __init__(self, db_manager):
+        super().__init__()
+        self.db = db_manager
+        self.running = True
+
+    def run(self):
+        C_GREEN = "#a3be8c"
+        C_ORANGE = "#d08770"
+        C_RED = "#bf616a"
+        C_YELLOW = "#ebcb8b"
+
+        while self.running:
+            # دریافت لیست سیستم‌ها از دیتابیس
+            # نکته: چون sqlite روی ترد دیگر است، بهتر است لیست را در bridge بگیریم و پاس بدهیم
+            # اما اگر db_manager با check_same_thread=False ساخته شده باشد، اینجا هم کار میکند.
+            try:
+                systems = self.db.get_flat_monitoring_list()
+            except:
+                break  # اگر دیتابیس لاک بود یا ارور داد
+
+            total = len(systems)
+            online = 0
+            offline = 0
+
+            # استفاده از ThreadPool برای پینگ موازی
+            with ThreadPoolExecutor(max_workers=30) as executor:
+                # مپ کردن فیوچرها به اطلاعات سیستم
+                futures = {
+                    executor.submit(self._execute_ping, s[2]): s for s in systems
+                }
+
+                for f in futures:
+                    if not self.running:
+                        break
+                    branch, name, ip = futures[f]
+                    try:
+                        is_up, ms = f.result()
+                        col = C_RED
+                        if is_up:
+                            online += 1
+                            if ms < 100:
+                                col = C_GREEN
+                            elif ms < 200:
+                                col = C_YELLOW
+                            elif ms < 400:
+                                col = C_ORANGE
+                            else:
+                                col = C_RED
+                        else:
+                            offline += 1
+                            col = C_RED
+
+                        # ارسال سیگنال آپدیت به رابط کاربری
+                        self.updateSignal.emit(branch, name, col)
+                    except:
+                        pass
+
+            if self.running:
+                self.statsSignal.emit(total, online, offline)
+                # وقفه ۵ ثانیه‌ای (به صورت خرد شده برای واکنش سریع به توقف)
+                for _ in range(50):
+                    if not self.running:
+                        break
+                    time.sleep(0.1)
+
+    def _execute_ping(self, ip):
+        # تابع پینگ داخلی
+        param = "-n" if os.name == "nt" else "-c"
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        cmd = ["ping", param, "1", "-w", "1000", ip]
+        try:
+            out = subprocess.check_output(
+                cmd, stderr=subprocess.STDOUT, creationflags=flags
+            ).decode()
+            match = re.search(r"time[=<]([\d\.]+)\s?ms", out, re.IGNORECASE)
+            return True, float(match.group(1)) if match else 0
+        except:
+            return False, 0
+
+    def stop(self):
+        self.running = False
+        self.wait()
