@@ -6,7 +6,6 @@ import ".." // Theme
 
 TCard {
     id: monitoring
-    // TCard خودش رنگ و بوردر را از Theme می‌گیرد
 
     property var branchesModel
     property bool isMonitoringActive
@@ -158,16 +157,21 @@ TCard {
                 Repeater {
                     model: systems
                     delegate: Rectangle {
+                        id: sysItem
                         width: (sysFlow.width - (4 * sysFlow.spacing)) / 5 
                         height: 24
+                        
                         color: {
                             if (model.statusColor === "default" || model.statusColor === undefined || model.statusColor === "#3b4252") {
-                                return Theme.bg_panel // رنگ تم (قابل تغییر)
+                                return Theme.bg_panel 
                             } else {
-                                return model.statusColor // رنگ وضعیت (سبز/قرمز/زرد)
+                                return model.statusColor 
                             }
                         }
+                        
                         radius: 4
+                        border.color: Theme.border
+                        border.width: 1
 
                         Label {
                             anchors.centerIn: parent
@@ -177,21 +181,77 @@ TCard {
                         }
 
                         MouseArea {
-                            anchors.fill: parent; acceptedButtons: Qt.RightButton
-                            onClicked: sysMenu.popup()
+                            anchors.fill: parent
+                            acceptedButtons: Qt.RightButton
+                            onClicked: ctxPopup.open()
                         }
 
-                        Menu {
-                            id: sysMenu
-                            padding: 5
-                            background: Rectangle { implicitWidth: 120; color: Theme.bg_panel; border.color: Theme.accent; radius: 8 }
-                            delegate: MenuItem {
-                                contentItem: Text { text: text; color: highlighted ? Theme.bg_main : Theme.text_main; padding: 10 }
-                                background: Rectangle { color: highlighted ? Theme.primary : "transparent" }
+                        // --- FIX: جایگزینی Menu با Custom Popup ---
+                        Popup {
+                            id: ctxPopup
+                            // باز شدن در مرکز آیتم
+                            x: (parent.width - width) / 2
+                            y: (parent.height - height) / 2
+                            width: 120
+                            height: 70
+                            modal: true
+                            focus: true
+                            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+                            background: Rectangle {
+                                color: Theme.bg_panel
+                                border.color: Theme.accent
+                                border.width: 1
+                                radius: 6
                             }
-                            MenuItem { text: "Edit"; onTriggered: monitoring.requestEditSystem(branchDelegate.currentBranchIndex, index, branchDelegate.currentBranchName, model.sysName, model.sysIp, model.sysType) }
-                            MenuItem { text: "Delete"; onTriggered: monitoring.requestDeleteSystem(branchDelegate.currentBranchIndex, index) }
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 4
+                                spacing: 2
+
+                                // دکمه Edit
+                                Rectangle {
+                                    Layout.fillWidth: true; Layout.fillHeight: true
+                                    color: maEdit.containsMouse ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.3) : "transparent"
+                                    radius: 4
+                                    Text {
+                                        text: "Edit"
+                                        color: Theme.text_main
+                                        font.pixelSize: 12
+                                        anchors.centerIn: parent
+                                    }
+                                    MouseArea {
+                                        id: maEdit; anchors.fill: parent; hoverEnabled: true
+                                        onClicked: {
+                                            monitoring.requestEditSystem(branchDelegate.currentBranchIndex, index, branchDelegate.currentBranchName, model.sysName, model.sysIp, model.sysType)
+                                            ctxPopup.close()
+                                        }
+                                    }
+                                }
+
+                                // دکمه Delete
+                                Rectangle {
+                                    Layout.fillWidth: true; Layout.fillHeight: true
+                                    color: maDel.containsMouse ? Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.3) : "transparent"
+                                    radius: 4
+                                    Text {
+                                        text: "Delete"
+                                        color: Theme.error // رنگ قرمز برای خطر
+                                        font.pixelSize: 12
+                                        anchors.centerIn: parent
+                                    }
+                                    MouseArea {
+                                        id: maDel; anchors.fill: parent; hoverEnabled: true
+                                        onClicked: {
+                                            monitoring.requestDeleteSystem(branchDelegate.currentBranchIndex, index)
+                                            ctxPopup.close()
+                                        }
+                                    }
+                                }
+                            }
                         }
+                        // ---------------------------------------------
                     }
                 }
             }
