@@ -1,0 +1,7 @@
+[10:46:59] [172.18.168.46] Fetching System Info...
+[10:47:09] [172.18.168.46] Printer action failed: Exception calling "SetDefaultPrinter" : "Not supported "
+At line:1 char:1
++ (Get-WmiObject -Class Win32_Printer -ComputerName '172.18.168.46' | W ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [], MethodInvocationException
+    + FullyQualifiedErrorId : WMIMethodException

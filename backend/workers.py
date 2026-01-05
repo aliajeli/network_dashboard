@@ -3,13 +3,15 @@ import shutil
 import time
 import subprocess
 import json
-import re  # <--- این خط برای تحلیل پینگ لازم است
-from concurrent.futures import ThreadPoolExecutor  # <--- این خط فراموش شده بود
+import re
+import base64
+from concurrent.futures import ThreadPoolExecutor
 from PyQt6.QtCore import QThread, pyqtSignal
+import wmi
+import pythoncom
 from backend.auth import AuthHelper
 
-# کلاس پایه برای جلوگیری از تکرار کد (اختیاری است اما برای تمیزی بهتر است)
-# اما طبق دستور "کد تغییر نکند"، من همان کلاس‌ها را دقیقاً کپی می‌کنم.
+# --- WORKER THREADS ---
 
 
 class CopyWorker(QThread):
@@ -71,7 +73,7 @@ class CopyWorker(QThread):
         if not self.msg_text:
             return
         try:
-            cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.msg_text]
+            cmd = ["msg", "*", "/server:" + ip, "/time:10", self.msg_text]
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
@@ -250,7 +252,7 @@ class DeleteWorker(QThread):
         if not self.msg_text:
             return
         try:
-            cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.msg_text]
+            cmd = ["msg", "*", "/server:" + ip, "/time:10", self.msg_text]
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
@@ -428,7 +430,7 @@ class ReplaceWorker(QThread):
         if not self.msg_text:
             return
         try:
-            cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.msg_text]
+            cmd = ["msg", "*", "/server:" + ip, "/time:10", self.msg_text]
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
@@ -625,7 +627,7 @@ class RenameWorker(QThread):
         if not self.msg_text:
             return
         try:
-            cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.msg_text]
+            cmd = ["msg", "*", "/server:" + ip, "/time:10", self.msg_text]
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
@@ -997,7 +999,7 @@ class MessageWorker(QThread):
                 self.statsSignal.emit(total, success_systems, error_systems)
                 continue
             try:
-                cmd = ["msg", "*", "/server:" + ip, "/time:99999", self.message]
+                cmd = ["msg", "*", "/server:" + ip, "/time:10", self.message]
                 self.progressSignal.emit(f"[{name}] Sending message...", "#d8dee9")
                 flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 result = subprocess.run(
@@ -1045,7 +1047,6 @@ class MessageWorker(QThread):
 
 
 class MonitorWorker(QThread):
-    # سیگنال برای ارسال نتیجه: (branch, name, color)
     updateSignal = pyqtSignal(str, str, str)
     statsSignal = pyqtSignal(int, int, int)
 
@@ -1061,21 +1062,16 @@ class MonitorWorker(QThread):
         C_YELLOW = "#ebcb8b"
 
         while self.running:
-            # دریافت لیست سیستم‌ها از دیتابیس
-            # نکته: چون sqlite روی ترد دیگر است، بهتر است لیست را در bridge بگیریم و پاس بدهیم
-            # اما اگر db_manager با check_same_thread=False ساخته شده باشد، اینجا هم کار میکند.
             try:
                 systems = self.db.get_flat_monitoring_list()
             except:
-                break  # اگر دیتابیس لاک بود یا ارور داد
+                break
 
             total = len(systems)
             online = 0
             offline = 0
 
-            # استفاده از ThreadPool برای پینگ موازی
             with ThreadPoolExecutor(max_workers=30) as executor:
-                # مپ کردن فیوچرها به اطلاعات سیستم
                 futures = {
                     executor.submit(self._execute_ping, s[2]): s for s in systems
                 }
@@ -1100,22 +1096,18 @@ class MonitorWorker(QThread):
                         else:
                             offline += 1
                             col = C_RED
-
-                        # ارسال سیگنال آپدیت به رابط کاربری
                         self.updateSignal.emit(branch, name, col)
                     except:
                         pass
 
             if self.running:
                 self.statsSignal.emit(total, online, offline)
-                # وقفه ۵ ثانیه‌ای (به صورت خرد شده برای واکنش سریع به توقف)
                 for _ in range(50):
                     if not self.running:
                         break
                     time.sleep(0.1)
 
     def _execute_ping(self, ip):
-        # تابع پینگ داخلی
         param = "-n" if os.name == "nt" else "-c"
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         cmd = ["ping", param, "1", "-w", "1000", ip]
@@ -1139,100 +1131,98 @@ class SystemInfoWorker(QThread):
     def __init__(self, ip, username, password, is_local):
         super().__init__()
         self.ip = ip
-        self.username = username.strip() if username else ""
-        self.password = password if password else ""
+        self.username = username
+        self.password = password
         self.is_local = is_local
 
     def run(self):
+        pythoncom.CoInitialize()
         try:
-            # اگر لوکال است، از دستورات ساده استفاده کن
+            if not self.is_local and not self.ip:
+                raise Exception("Target IP is empty!")
+            connection = None
             if self.is_local:
-                self._run_local()
+                connection = wmi.WMI()
             else:
-                self._run_remote()
+                connection = wmi.WMI(
+                    computer=self.ip, user=self.username, password=self.password
+                )
+
+            os_list = connection.Win32_OperatingSystem()
+            if not os_list:
+                raise Exception("No OS data returned.")
+            os_info = os_list[0]
+
+            remote_name = os_info.CSName
+            local_name = os.environ["COMPUTERNAME"]
+
+            if not self.is_local and remote_name.lower() == local_name.lower():
+                if self.ip not in ["127.0.0.1", "localhost", "::1"]:
+                    raise Exception(
+                        f"Connection Fallback Detected! Connected to Localhost ('{remote_name}') instead of {self.ip}."
+                    )
+
+            os_data = {
+                "Caption": os_info.Caption,
+                "Version": os_info.Version,
+                "OSArchitecture": os_info.OSArchitecture,
+                "SerialNumber": os_info.SerialNumber,
+                "_ComputerName": os_info.CSName,
+            }
+
+            cpu_info = connection.Win32_Processor()[0]
+            cpu_data = {"Name": cpu_info.Name, "NumberOfCores": cpu_info.NumberOfCores}
+
+            ram_info = connection.Win32_ComputerSystem()[0]
+            ram_data = {
+                "TotalPhysicalMemory": ram_info.TotalPhysicalMemory,
+                "Model": ram_info.Model,
+                "Manufacturer": ram_info.Manufacturer,
+            }
+
+            disks_data = []
+            for disk in connection.Win32_LogicalDisk(DriveType=3):
+                disks_data.append(
+                    {
+                        "DeviceID": disk.DeviceID,
+                        "Size": int(disk.Size) if disk.Size else 0,
+                        "FreeSpace": int(disk.FreeSpace) if disk.FreeSpace else 0,
+                    }
+                )
+
+            printers_data = []
+            for prn in connection.Win32_Printer():
+                printers_data.append(
+                    {
+                        "Name": prn.Name,
+                        "Default": prn.Default,
+                        "PortName": prn.PortName,
+                        "DriverName": prn.DriverName,
+                        "PrinterStatus": prn.PrinterStatus,
+                    }
+                )
+
+            final_data = {
+                "OS": os_data,
+                "CPU": cpu_data,
+                "RAM": ram_data,
+                "Disks": disks_data,
+                "Printers": printers_data,
+                "_ComputerName": os_data["_ComputerName"],
+            }
+
+            self.finishedSignal.emit(json.dumps(final_data))
+
+        except wmi.x_wmi as x:
+            err_msg = str(x)
+            if "0x80070005" in err_msg:
+                err_msg = "Access Denied (Check User/Pass & Firewall)."
+            if "0x800706ba" in err_msg:
+                err_msg = "RPC Server Unavailable (Target Offline or Firewall)."
+            self.finishedSignal.emit(json.dumps({"error": err_msg}))
 
         except Exception as e:
             self.finishedSignal.emit(json.dumps({"error": str(e)}))
 
-    def _run_local(self):
-        # اجرای ساده برای لوکال (بدون Credential)
-        self._execute_ps("")
-
-    def _run_remote(self):
-        # ساخت Credential بلاک فقط اگر یوزر داریم
-        cred_block = ""
-        if self.username and self.password:
-            # روش جدید: استفاده از CIM Option (بدون نیاز به SecureString)
-            cred_block = f"""
-            $secPass = ConvertTo-SecureString '{self.password}' -AsPlainText -Force
-            $cred = New-Object System.Management.Automation.PSCredential ('{self.username}', $secPass)
-            $cimOpt = New-CimSessionOption -Protocol DCOM
-            $sess = New-CimSession -ComputerName '{self.ip}' -Credential $cred -SessionOption $cimOpt -ErrorAction Stop
-            """
-        else:
-            # اتصال بدون پسورد (Current User)
-            cred_block = (
-                f"$sess = New-CimSession -ComputerName '{self.ip}' -ErrorAction Stop"
-            )
-
-        self._execute_ps(cred_block, use_session=True)
-
-    def _execute_ps(self, setup_block, use_session=False):
-        # اگر از سشن استفاده می‌کنیم، پارامتر دستور فرق می‌کند
-        cmd_param = "-CimSession $sess" if use_session else ""
-
-        ps_script = f"""
-        $ErrorActionPreference = 'Stop'
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        
-        try {{
-            {setup_block}
-            
-            # 1. جمع‌آوری اطلاعات با CIM (پایدارتر از WMI Object)
-            $os = Get-CimInstance Win32_OperatingSystem {cmd_param} | Select-Object Caption, Version, OSArchitecture, SerialNumber, CSName
-            $cpu = Get-CimInstance Win32_Processor {cmd_param} | Select-Object Name, NumberOfCores
-            $ram = Get-CimInstance Win32_ComputerSystem {cmd_param} | Select-Object TotalPhysicalMemory, Model, Manufacturer
-            $disk = Get-CimInstance Win32_LogicalDisk {cmd_param} | Where-Object {{ $_.DriveType -eq 3 }} | Select-Object DeviceID, Size, FreeSpace
-            $printers = Get-CimInstance Win32_Printer {cmd_param} | Select-Object Name, Default, PortName, DriverName, PrinterStatus
-
-            # اگر سشن باز کردیم، ببندیمش
-            if ($sess) {{ Remove-CimSession $sess }}
-
-            $info = @{{
-                _ComputerName = $os.CSName
-                OS = $os
-                CPU = $cpu
-                RAM = $ram
-                Disks = $disk
-                Printers = $printers
-            }}
-            
-            $info | ConvertTo-Json -Depth 2 -Compress
-
-        }} catch {{
-            $err = $_.Exception.Message
-            $err = $err -replace '[\\r\\n]', ' ' -replace '"', "'"
-            Write-Output "{{\\"error\\": \\"$err\\"}}"
-        }}
-        """
-
-        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        cmd = ["powershell", "-NoProfile", "-Command", ps_script]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            creationflags=flags,
-            encoding="utf-8",
-            timeout=25,
-        )
-        output = result.stdout.strip()
-
-        if not output:
-            err = result.stderr if result.stderr else "Empty response."
-            self.finishedSignal.emit(json.dumps({"error": err}))
-        elif not output.startswith("{"):
-            self.finishedSignal.emit(json.dumps({"error": f"PS Error: {output}"}))
-        else:
-            self.finishedSignal.emit(output)
+        finally:
+            pythoncom.CoUninitialize()

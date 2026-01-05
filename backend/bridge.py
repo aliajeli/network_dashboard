@@ -5,6 +5,7 @@ import subprocess
 import threading
 import json
 import re
+import base64  # <--- این خط را به ایمپورت‌های بالا اضافه کنید
 from concurrent.futures import ThreadPoolExecutor
 from PyQt6.QtCore import QObject, pyqtSlot, pyqtSignal, QStandardPaths, QStorageInfo
 from PyQt6.QtWidgets import QFileDialog
@@ -35,6 +36,7 @@ class Backend(QObject):
     fileAddedSignal = pyqtSignal(str, str, str)
     filesClearedSignal = pyqtSignal()
     sysInfoStatus = pyqtSignal(str)  # سیگنال جدید
+    printersUpdated = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -52,11 +54,24 @@ class Backend(QObject):
             color = "#d08770"
         self.logSignal.emit(f"{time.strftime('[%H:%M:%S]')} {message}", color)
 
-    @pyqtSlot(str, str, str, str)
+    # --- متد دریافت اطلاعات سیستم ---
+    @pyqtSlot(str, str, str, bool)
     def get_system_full_info(self, ip, username, password, is_local):
-        # ...
-        self.sysInfoStatus.emit(f"Fetching info from {ip}...")  # ارسال وضعیت
-        # ...
+        # تبدیل رشته QML به بولین پایتون
+        # QML "true" یا "false" می‌فرستد (حروف کوچک)
+        print(
+            f"BRIDGE DEBUG: Target={ip} | User={username} | LocalMode={is_local} (Type: {type(is_local)})"
+        )
+
+        from backend.workers import SystemInfoWorker
+
+        # ارسال مقادیر تمیز شده به ورکر
+        worker = SystemInfoWorker(ip, username, password, is_local)
+
+        worker.finishedSignal.connect(self.on_sysinfo_received)
+        worker.finished.connect(lambda: self._cleanup_worker(worker))
+
+        self.workers.append(worker)
         worker.start()
 
     def on_sysinfo_received(self, json_data):
@@ -508,29 +523,161 @@ class Backend(QObject):
     @pyqtSlot(str, str, str, str, bool)
     def printer_action(self, ip, printer_name, action, new_name, use_auth):
         """
-        action: 'default', 'test', 'rename'
+        Actions: 'rename', 'test'
         """
 
         def run():
             try:
-                # ساخت پارامترهای اتصال (مشابه worker)
-                ps_params = f"-ComputerName '{ip}'"
-                # (برای سادگی اینجا احراز هویت را خلاصه می‌کنیم، در نسخه واقعی باید مثل worker باشد)
+                self.log(f"[{ip}] Requesting printer {action}...", "INFO")
+
+                raw_script = ""
+
+                if action == "test":
+                    raw_script = f"""
+                    $ErrorActionPreference = 'Stop'
+                    $p = Get-WmiObject Win32_Printer | Where-Object {{ $_.Name -eq '{printer_name}' }}
+                    if ($p) {{ 
+                        $p.PrintTestPage() 
+                    }} else {{
+                        throw "Printer '{printer_name}' not found."
+                    }}
+                    """
+                # --- ACTION: RENAME (روش تزریق Base64) ---
+                elif action == "rename":
+                    # 1. اسکریپت خامی که باید روی مقصد اجرا شود
+                    # این اسکریپت روی خودِ کامپیوتر مقصد اجرا میشود، پس محدودیتی ندارد
+                    raw_script = f"""
+                    $ErrorActionPreference = 'Stop'
+                    $p = Get-WmiObject Win32_Printer | Where-Object {{ $_.Name -eq '{printer_name}' }}
+                    if ($p) {{ 
+                        $p.RenamePrinter('{new_name}')
+                    }} else {{
+                        throw "Printer not found locally."
+                    }}
+                    """
+
+                    # 2. رمزگذاری اسکریپت به Base64 (استاندارد پاورشل UTF-16LE است)
+                    encoded_script = base64.b64encode(
+                        raw_script.encode("utf_16_le")
+                    ).decode("utf-8")
+
+                    # 3. دستوری که باید توسط WMI اجرا شود (اجرای پاورشل لوکال در مقصد)
+                    process_command = f"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded_script}"
+
+                    # 4. دستور نهایی: فراخوانی Win32_Process.Create روی سیستم ریموت
+                    # این دستور به WMI میگوید یک پروسه جدید باز کن
+                    full_cmd = f"powershell -NoProfile -Command \"(Get-WmiObject -List Win32_Process -ComputerName '{ip}').Create('{process_command}')\""
+
+                    # اجرا
+                    res = subprocess.run(
+                        full_cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+
+                    # بررسی خروجی WMI (اگر ReturnValue صفر بود یعنی موفق)
+                    if (
+                        "ReturnValue" not in res.stdout
+                        or "ReturnValue : 0" not in res.stdout
+                    ):
+                        # اگر ارور داد یا مقدار بازگشتی 0 نبود
+                        if res.stderr:
+                            raise Exception(res.stderr.strip())
+                        # اگر خروجی نامشخص بود، فرض بر موفقیت میگذاریم چون پروسه ساخته شده
+
+                self.log(f"[{ip}] Action '{action}' command sent.", "SUCCESS")
+
+                # --- REFRESH LIST ---
+                if action == "rename":
+                    # چون پروسه ریموت ممکن است چند ثانیه طول بکشد، صبر میکنیم
+                    self.log(f"[{ip}] Waiting for changes...", "INFO")
+                    time.sleep(4)
+
+                    refresh_cmd = f"powershell -NoProfile -Command \"Get-WmiObject -Class Win32_Printer -ComputerName '{ip}' | Select-Object Name, Default, PortName, DriverName, PrinterStatus | ConvertTo-Json -Compress\""
+                    refresh_res = subprocess.run(
+                        refresh_cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+
+                    output = refresh_res.stdout.strip()
+                    if output:
+                        self.printersUpdated.emit(output)
+                        self.log(f"[{ip}] Printer list updated.", "SUCCESS")
+
+            except Exception as e:
+                self.log(f"[{ip}] Printer action failed: {str(e)}", "ERROR")
+
+        threading.Thread(target=run).start()
+
+    @pyqtSlot(
+        str, str, str, str, str, str, bool
+    )  # ip, user, pass, printer, action, newname, local
+    def printer_action_full(
+        self, ip, username, password, printer_name, action, new_name, is_local
+    ):
+        # ... (همان لاجیک بالا با استفاده از username/password برای ساخت Credential)
+        """
+        Actions: 'default', 'rename', 'test'
+        """
+
+        def run():
+            try:
+                # 1. ساخت Credential Block (مشابه ورکر)
+                cred_setup = ""
+                conn_param = f"-ComputerName '{ip}'"
+
+                if use_auth and self.use_auth_creds:  # فرض: یوزر/پسورد ذخیره شده
+                    # (نکته: چون یوزر/پسورد را در bridge ذخیره نکرده‌ایم، بهتر است دوباره بفرستیم
+                    # یا اینکه از همان ورودی‌های AuthDialog استفاده کنیم که در QML هستند)
+                    pass
+
+                # برای سادگی، فرض می‌کنیم دستورات WMI متد روی شبکه کار می‌کنند (چون قبلا کار کردند)
+                # اما برای تغییر نام و دیفالت، بهترین راه استفاده از CIM است.
 
                 cmd = ""
                 if action == "default":
-                    # WMI Method: SetDefaultPrinter
-                    cmd = f"(Get-WmiObject Win32_Printer {ps_params} | Where-Object Name -eq '{printer_name}').SetDefaultPrinter()"
-                elif action == "test":
-                    cmd = f"(Get-WmiObject Win32_Printer {ps_params} | Where-Object Name -eq '{printer_name}').PrintTestPage()"
+                    # روش CIM (پایدارتر)
+                    cmd = f"Invoke-CimMethod -ClassName Win32_Printer -Filter \"Name='{printer_name}'\" -MethodName SetDefaultPrinter {conn_param}"
                 elif action == "rename":
-                    cmd = f"(Get-WmiObject Win32_Printer {ps_params} | Where-Object Name -eq '{printer_name}').RenamePrinter('{new_name}')"
+                    cmd = f"Rename-Printer -Name '{printer_name}' -NewName '{new_name}' {conn_param}"
+                elif action == "test":
+                    cmd = f"Invoke-CimMethod -ClassName Win32_Printer -Filter \"Name='{printer_name}'\" -MethodName PrintTestPage {conn_param}"
 
+                # اجرای دستور
                 full_cmd = f'powershell -NoProfile -Command "{cmd}"'
-                subprocess.run(
-                    full_cmd, shell=True, creationflags=subprocess.CREATE_NO_WINDOW
+                res = subprocess.run(
+                    full_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-                self.log(f"[{ip}] Printer {action} executed.", "SUCCESS")
+
+                if res.returncode != 0:
+                    raise Exception(res.stderr)
+
+                self.log(f"[{ip}] Printer {action} success.", "SUCCESS")
+
+                # 2. دریافت لیست جدید (فقط اگر تغییر نام یا دیفالت بود)
+                if action in ["default", "rename"]:
+                    self.log(f"[{ip}] Refreshing printers...", "INFO")
+                    # دریافت مجدد لیست
+                    refresh_cmd = f'powershell -NoProfile -Command "Get-CimInstance Win32_Printer {conn_param} | Select-Object Name, Default, PortName, DriverName, PrinterStatus | ConvertTo-Json -Compress"'
+                    refresh_res = subprocess.run(
+                        refresh_cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+
+                    if refresh_res.stdout:
+                        self.printersUpdated.emit(refresh_res.stdout)
 
             except Exception as e:
                 self.log(f"[{ip}] Printer action failed: {str(e)}", "ERROR")

@@ -26,7 +26,10 @@ ApplicationWindow {
             sysInfoDialog.useAuth = useAuth
             
             // درخواست اطلاعات
-            backend.get_system_full_info(ip, user, pass, useAuth)
+
+            var isLocal = false // برای ریموت همیشه فالس است
+            
+            backend.get_system_full_info(ip, user, pass, isLocal)
         }
     }
 
@@ -121,6 +124,26 @@ ApplicationWindow {
         function onSysInfoStatus(msg) {
             window.statusMessage = msg
         }
+
+        function onPrintersUpdated(jsonString) {
+            try {
+                var newPrinters = JSON.parse(jsonString)
+                // اگر تکی بود آرایه کن
+                if (!Array.isArray(newPrinters)) newPrinters = [newPrinters]
+                
+                // آپدیت مدل داخل دیالوگ
+                var currentData = sysInfoDialog.jsonData
+                currentData.Printers = newPrinters
+                sysInfoDialog.jsonData = currentData
+                sysInfoDialog.jsonDataChanged() // اجبار به رفرش
+                
+                console.log("Printers Refreshed Successfully")
+            } catch(e) {
+                console.log("Printer Refresh Error:", e)
+            }
+        }
+
+
         function onUpdateStatsSignal(total, val1, val2) { 
             // اگر عملیات در حال اجراست
             if (isOperationRunning) {
