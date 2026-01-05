@@ -18,6 +18,22 @@ ApplicationWindow {
     color: "transparent" // پنجره اصلی شفاف است
 
 
+    AuthDialog {
+        id: authDialog
+        onConnect: (ip, user, pass, useAuth) => {
+            // ذخیره مقادیر برای استفاده در عملیات پرینتر
+            sysInfoDialog.targetIp = ip
+            sysInfoDialog.useAuth = useAuth
+            
+            // درخواست اطلاعات
+            backend.get_system_full_info(ip, user, pass, useAuth)
+        }
+    }
+
+    SystemInfoDialog {
+        id: sysInfoDialog
+    }
+
 
     property real currentProgress: 0.0
 
@@ -41,6 +57,9 @@ ApplicationWindow {
     // File Browser Logic
     property string currentBrowsePath: ""
     property bool browseFolderMode: false
+
+    property string statusMessage: "" // متغیر جدید
+
 
     // Shared Models
     ListModel { id: branchesModel }
@@ -99,8 +118,10 @@ ApplicationWindow {
         function onLogSignal(msg, colorCode) { logModel.append({"messageText": msg, "messageColor": colorCode}) }
         function onPingResultSignal(status) { monitoringView.pingStatusText = status; monitoringView.pingStatusColor = (status === "Online") ? Theme.success : Theme.warning }
         function onUpdateMonitorSignal(branch, name, color) { updateSystemStatus(branch, name, color) }
-        
-function onUpdateStatsSignal(total, val1, val2) { 
+        function onSysInfoStatus(msg) {
+            window.statusMessage = msg
+        }
+        function onUpdateStatsSignal(total, val1, val2) { 
             // اگر عملیات در حال اجراست
             if (isOperationRunning) {
                 window.opTotal = total.toString(); 
@@ -199,6 +220,28 @@ function onUpdateStatsSignal(total, val1, val2) {
         function onResetMonitoringSignal() { resetSystemStatus() }
         function onFileAddedSignal(name, path, type) { checkAndAddFile(name, path, type) }
         function onFilesClearedSignal() { filesModel.clear() }
+
+        function onSysInfoReady(jsonString) {
+            console.log("Raw Output from Python:", jsonString) // این خط را اضافه کنید برای دیباگ
+
+            try {
+                var data = JSON.parse(jsonString)
+                if (data.error) {
+                    messageDialog.msg = "Error: " + data.error
+                    messageDialog.isError = true
+                    messageDialog.open()
+                } else {
+                    sysInfoDialog.jsonData = data
+                    sysInfoDialog.open()
+                }
+            } catch(e) {
+                console.log("JSON Parse Error:", e)
+                                // نمایش متن خام به عنوان خطا
+                messageDialog.msg = "Invalid Data Received:\n" + jsonString
+                messageDialog.isError = true
+                messageDialog.open()
+            }
+        }
     }
 
     // ... (بقیه توابع startCopyOperation و غیره بدون تغییر) ...
@@ -380,6 +423,11 @@ function onUpdateStatsSignal(total, val1, val2) {
                 onRequestAddSystem: openAddDialog()
                 onRequestEditSystem: (bIdx, sIdx, branch, name, ip, type) => openEditDialog(bIdx, sIdx, branch, name, ip, type)
                 onRequestDeleteSystem: (bIdx, sIdx) => deleteSystem(bIdx, sIdx)
+
+                onRequestSystemInfo: (ip) => {
+                    authDialog.targetIp = ip
+                    authDialog.open()
+                }
             }
 
             OperationsView {

@@ -34,6 +34,24 @@ Rectangle {
         anchors.margins: 5
         spacing: 8
 
+
+        Text {
+            text: window.statusMessage // این متغیر را در main تعریف میکنیم
+            color: Theme.accent
+            font.pixelSize: 11
+            anchors.left: parent.left
+            anchors.leftMargin: 15
+            anchors.verticalCenter: parent.verticalCenter
+            visible: text !== ""
+            
+            // انیمیشن چشمک زن
+            SequentialAnimation on opacity {
+                loops: Animation.Infinite
+                running: parent.visible
+                NumberAnimation { to: 0.5; duration: 800 }
+                NumberAnimation { to: 1.0; duration: 800 }
+            }
+        }
         // --- Theme Switcher Button ---
         Rectangle {
             width: 30

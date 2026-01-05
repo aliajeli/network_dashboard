@@ -1131,3 +1131,108 @@ class MonitorWorker(QThread):
     def stop(self):
         self.running = False
         self.wait()
+
+
+class SystemInfoWorker(QThread):
+    finishedSignal = pyqtSignal(str)
+
+    def __init__(self, ip, username, password, is_local):
+        super().__init__()
+        self.ip = ip
+        self.username = username.strip() if username else ""
+        self.password = password if password else ""
+        self.is_local = is_local
+
+    def run(self):
+        try:
+            # اگر لوکال است، از دستورات ساده استفاده کن
+            if self.is_local:
+                self._run_local()
+            else:
+                self._run_remote()
+
+        except Exception as e:
+            self.finishedSignal.emit(json.dumps({"error": str(e)}))
+
+    def _run_local(self):
+        # اجرای ساده برای لوکال (بدون Credential)
+        self._execute_ps("")
+
+    def _run_remote(self):
+        # ساخت Credential بلاک فقط اگر یوزر داریم
+        cred_block = ""
+        if self.username and self.password:
+            # روش جدید: استفاده از CIM Option (بدون نیاز به SecureString)
+            cred_block = f"""
+            $secPass = ConvertTo-SecureString '{self.password}' -AsPlainText -Force
+            $cred = New-Object System.Management.Automation.PSCredential ('{self.username}', $secPass)
+            $cimOpt = New-CimSessionOption -Protocol DCOM
+            $sess = New-CimSession -ComputerName '{self.ip}' -Credential $cred -SessionOption $cimOpt -ErrorAction Stop
+            """
+        else:
+            # اتصال بدون پسورد (Current User)
+            cred_block = (
+                f"$sess = New-CimSession -ComputerName '{self.ip}' -ErrorAction Stop"
+            )
+
+        self._execute_ps(cred_block, use_session=True)
+
+    def _execute_ps(self, setup_block, use_session=False):
+        # اگر از سشن استفاده می‌کنیم، پارامتر دستور فرق می‌کند
+        cmd_param = "-CimSession $sess" if use_session else ""
+
+        ps_script = f"""
+        $ErrorActionPreference = 'Stop'
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        
+        try {{
+            {setup_block}
+            
+            # 1. جمع‌آوری اطلاعات با CIM (پایدارتر از WMI Object)
+            $os = Get-CimInstance Win32_OperatingSystem {cmd_param} | Select-Object Caption, Version, OSArchitecture, SerialNumber, CSName
+            $cpu = Get-CimInstance Win32_Processor {cmd_param} | Select-Object Name, NumberOfCores
+            $ram = Get-CimInstance Win32_ComputerSystem {cmd_param} | Select-Object TotalPhysicalMemory, Model, Manufacturer
+            $disk = Get-CimInstance Win32_LogicalDisk {cmd_param} | Where-Object {{ $_.DriveType -eq 3 }} | Select-Object DeviceID, Size, FreeSpace
+            $printers = Get-CimInstance Win32_Printer {cmd_param} | Select-Object Name, Default, PortName, DriverName, PrinterStatus
+
+            # اگر سشن باز کردیم، ببندیمش
+            if ($sess) {{ Remove-CimSession $sess }}
+
+            $info = @{{
+                _ComputerName = $os.CSName
+                OS = $os
+                CPU = $cpu
+                RAM = $ram
+                Disks = $disk
+                Printers = $printers
+            }}
+            
+            $info | ConvertTo-Json -Depth 2 -Compress
+
+        }} catch {{
+            $err = $_.Exception.Message
+            $err = $err -replace '[\\r\\n]', ' ' -replace '"', "'"
+            Write-Output "{{\\"error\\": \\"$err\\"}}"
+        }}
+        """
+
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        cmd = ["powershell", "-NoProfile", "-Command", ps_script]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            creationflags=flags,
+            encoding="utf-8",
+            timeout=25,
+        )
+        output = result.stdout.strip()
+
+        if not output:
+            err = result.stderr if result.stderr else "Empty response."
+            self.finishedSignal.emit(json.dumps({"error": err}))
+        elif not output.startswith("{"):
+            self.finishedSignal.emit(json.dumps({"error": f"PS Error: {output}"}))
+        else:
+            self.finishedSignal.emit(output)

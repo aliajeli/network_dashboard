@@ -19,7 +19,8 @@ TCard {
     signal requestAddSystem()
     signal requestEditSystem(int bIdx, int sIdx, string branch, string name, string ip, string type)
     signal requestDeleteSystem(int bIdx, int sIdx)
-
+    signal requestSystemInfo(string ip)
+    
     // --- Top Section ---
     Item {
         id: topSection
@@ -281,6 +282,18 @@ TCard {
                                     txtCol: Theme.text_dim
                                     bgCol: Theme.text_dim
                                     action: function() { monitoring.requestDeleteSystem(branchDelegate.currentBranchIndex, index) }
+                                }
+                                 // ... (داخل popupCol) ...
+
+                                // --- System Info Item ---
+                                PopupItem {
+                                    visible: (model.sysType === "Client" || model.sysType === "Checkout")
+                                    label: "System Info"
+                                    txtCol: Theme.accent
+                                    bgCol: Theme.accent
+                                    action: function() { 
+                                        monitoring.requestSystemInfo(model.sysIp) 
+                                    }
                                 }
                             }
                         }

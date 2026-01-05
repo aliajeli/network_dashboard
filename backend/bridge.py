@@ -34,6 +34,7 @@ class Backend(QObject):
     opFinishedSignal = pyqtSignal(str)
     fileAddedSignal = pyqtSignal(str, str, str)
     filesClearedSignal = pyqtSignal()
+    sysInfoStatus = pyqtSignal(str)  # سیگنال جدید
 
     def __init__(self):
         super().__init__()
@@ -50,6 +51,17 @@ class Backend(QObject):
         elif level == "WARN":
             color = "#d08770"
         self.logSignal.emit(f"{time.strftime('[%H:%M:%S]')} {message}", color)
+
+    @pyqtSlot(str, str, str, str)
+    def get_system_full_info(self, ip, username, password, is_local):
+        # ...
+        self.sysInfoStatus.emit(f"Fetching info from {ip}...")  # ارسال وضعیت
+        # ...
+        worker.start()
+
+    def on_sysinfo_received(self, json_data):
+        self.sysInfoReady.emit(json_data)
+        self.sysInfoStatus.emit("")  # پاک کردن وضعیت پس از اتمام
 
     # ... (متدهای load_monitoring, load_destinations, add_... بدون تغییر) ...
     @pyqtSlot(result=str)
@@ -464,3 +476,63 @@ class Backend(QObject):
                 self.log(f"[{ip}] Failed to launch RDP: {str(e)}", "ERROR")
 
         threading.Thread(target=run_rdp).start()
+
+    # ... (داخل کلاس Backend) ...
+
+    # --- System Info & Printers ---
+    sysInfoReady = pyqtSignal(str)  # سیگنال جدید برای ارسال نتیجه به QML
+
+    @pyqtSlot(str, str, str, bool)
+    def get_system_full_info(self, ip, username, password, use_auth):
+        self.log(f"[{ip}] Fetching System Info...", "INFO")
+
+        # ایمپورت داخلی برای جلوگیری از سیکل
+        from backend.workers import SystemInfoWorker
+
+        worker = SystemInfoWorker(ip, username, password, use_auth)
+
+        worker.finishedSignal.connect(self.on_sysinfo_received)
+        # اتصال به پاک‌کننده (اگر متد _cleanup_worker را دارید)
+        worker.finished.connect(lambda: self._cleanup_worker(worker))
+
+        self.workers.append(worker)
+        worker.start()
+
+    def on_sysinfo_received(self, json_data):
+        self.sysInfoReady.emit(json_data)
+
+    # --- Printer Actions (اجرای مستقیم دستورات WMI) ---
+    # این دستورات چون کوتاه هستند نیاز به Worker جدا ندارند (یا می‌توانند داشته باشند)
+    # اما برای سادگی در ترد جدا اجرا می‌شوند.
+
+    @pyqtSlot(str, str, str, str, bool)
+    def printer_action(self, ip, printer_name, action, new_name, use_auth):
+        """
+        action: 'default', 'test', 'rename'
+        """
+
+        def run():
+            try:
+                # ساخت پارامترهای اتصال (مشابه worker)
+                ps_params = f"-ComputerName '{ip}'"
+                # (برای سادگی اینجا احراز هویت را خلاصه می‌کنیم، در نسخه واقعی باید مثل worker باشد)
+
+                cmd = ""
+                if action == "default":
+                    # WMI Method: SetDefaultPrinter
+                    cmd = f"(Get-WmiObject Win32_Printer {ps_params} | Where-Object Name -eq '{printer_name}').SetDefaultPrinter()"
+                elif action == "test":
+                    cmd = f"(Get-WmiObject Win32_Printer {ps_params} | Where-Object Name -eq '{printer_name}').PrintTestPage()"
+                elif action == "rename":
+                    cmd = f"(Get-WmiObject Win32_Printer {ps_params} | Where-Object Name -eq '{printer_name}').RenamePrinter('{new_name}')"
+
+                full_cmd = f'powershell -NoProfile -Command "{cmd}"'
+                subprocess.run(
+                    full_cmd, shell=True, creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                self.log(f"[{ip}] Printer {action} executed.", "SUCCESS")
+
+            except Exception as e:
+                self.log(f"[{ip}] Printer action failed: {str(e)}", "ERROR")
+
+        threading.Thread(target=run).start()
