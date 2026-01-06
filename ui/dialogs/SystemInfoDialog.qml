@@ -274,14 +274,6 @@ Dialog {
                             spacing: 8
                             Layout.alignment: Qt.AlignRight 
                             
-                            // دکمه Test Page (بازگردانده شد چون در درخواست قبل از حذف بود)
-                            TButton { 
-                                text: "Test Page"
-                                height: 30; width: 90
-                                btnColor: Theme.bg_input; textColor: Theme.text_main
-                                onClicked: backend.printer_action(root.targetIp, modelData.Name, "test", "", root.useAuth)
-                            }
-                            
                             // دکمه Rename
                             TButton { 
                                 text: "Rename"

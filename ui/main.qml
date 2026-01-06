@@ -245,8 +245,6 @@ ApplicationWindow {
         function onFilesClearedSignal() { filesModel.clear() }
 
         function onSysInfoReady(jsonString) {
-            console.log("Raw Output from Python:", jsonString) // این خط را اضافه کنید برای دیباگ
-
             try {
                 var data = JSON.parse(jsonString)
                 if (data.error) {
@@ -258,8 +256,7 @@ ApplicationWindow {
                     sysInfoDialog.open()
                 }
             } catch(e) {
-                console.log("JSON Parse Error:", e)
-                                // نمایش متن خام به عنوان خطا
+                 // نمایش متن خام به عنوان خطا
                 messageDialog.msg = "Invalid Data Received:\n" + jsonString
                 messageDialog.isError = true
                 messageDialog.open()

@@ -531,19 +531,8 @@ class Backend(QObject):
                 self.log(f"[{ip}] Requesting printer {action}...", "INFO")
 
                 raw_script = ""
-
-                if action == "test":
-                    raw_script = f"""
-                    $ErrorActionPreference = 'Stop'
-                    $p = Get-WmiObject Win32_Printer | Where-Object {{ $_.Name -eq '{printer_name}' }}
-                    if ($p) {{ 
-                        $p.PrintTestPage() 
-                    }} else {{
-                        throw "Printer '{printer_name}' not found."
-                    }}
-                    """
                 # --- ACTION: RENAME (روش تزریق Base64) ---
-                elif action == "rename":
+                if action == "rename":
                     # 1. اسکریپت خامی که باید روی مقصد اجرا شود
                     # این اسکریپت روی خودِ کامپیوتر مقصد اجرا میشود، پس محدودیتی ندارد
                     raw_script = f"""
